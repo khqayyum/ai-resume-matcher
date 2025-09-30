@@ -26,6 +26,7 @@ COL --> MAPS["S3 maps/"]
 UI --> SCORE["Lambda URL: score"]
 SCORE --> EXT
 SCORE --> MAPS
+```
 
 ## How it works
 
