@@ -1,1 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: API Gateway + Lambda (Node.js 20 + AWS SDK v3) to generate pre-signed S3 upload URLs for resumes.
 
+Resources:
+  GetUploadUrlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: kaq-ai-resume-matcher-api-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3PutObjectForPresign
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource: arn:aws:s3:::kaq-ai-resume-matcher/uploads/*
+
+  GetUploadUrlFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: kaq-ai-resume-matcher-get-upload-url
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt GetUploadUrlRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET_NAME: kaq-ai-resume-matcher
+      Code:
+        ZipFile: |
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+          const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+          const client = new S3Client({});
+
+          // CORS headers used on ALL responses
+          const CORS = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, update",
+            "Access-Control-Allow-Headers": "Content-Type"
+          };
+
+          exports.handler = async (event) => {
+            // Support both REST API (event.httpMethod) and HTTP API (event.requestContext.http.method)
+            const method =
+              (event?.requestContext?.http?.method || event?.httpMethod || "GET").toUpperCase();
+
+            // Handle the browser's CORS preflight
+            if (method === "OPTIONS") {
+              return { statusCode: 204, headers: CORS };
+            }
+
+            try {
+              const qs = event.queryStringParameters || {};
+              const safeName = (qs.file || `resume-${Date.now()}.pdf`).replace(/[^a-zA-Z0-9.\-_]/g, "_");
+              const key = `uploads/${Date.now()}-${safeName}`;
+
+              // No ContentType here (avoids signature mismatches)
+              const cmd = new PutObjectCommand({
+                Bucket: process.env.BUCKET_NAME,
+                Key: key
+              });
+
+              const uploadUrl = await getSignedUrl(client, cmd, { expiresIn: 300 });
+
+              return {
+                statusCode: 200,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ uploadUrl, objectKey: key })
+              };
+            } catch (err) {
+              console.error(err);
+              return {
+                statusCode: 500,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ error: "Internal Server Error" })
+              };
+            }
+          };
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: kaq-ai-resume-matcher-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: ['GET','OPTIONS']
+        AllowHeaders: ['*']
+
+  GetUploadUrlIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetUploadUrlFn.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  GetUploadUrlRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /upload-url'
+      Target: !Sub integrations/${GetUploadUrlIntegration}
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+
+  AllowApiInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetUploadUrlFn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/upload-url
+
+Outputs:
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  UploadUrlExample:
+    Value: !Sub '${HttpApi.ApiEndpoint}/upload-url?file=sample.pdf&contentType=application/pdf'
