@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 bucket for AI-Powered Resume Matcher (student uploads).
+
+Resources:
+  ResumesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: kaq-ai-resume-matcher
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ['http://localhost:8080', 'http://127.0.0.1:8080']
+            AllowedMethods: ['GET','PUT','HEAD']
+            AllowedHeaders: ['*']
+            ExposedHeaders: ['ETag','x-amz-request-id','x-amz-id-2']
+            MaxAge: 3000
+
+Outputs:
+  ResumesBucketName:
+    Value: !Ref ResumesBucket
+  ResumesBucketArn:
+    Value: !GetAtt ResumesBucket.Arn
