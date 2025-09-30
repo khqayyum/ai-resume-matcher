@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Resume Matcher – Upload & Score</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --fg:#111; --muted:#666; --okBg:#ecfdf5; --okFg:#065f46; --errBg:#fef2f2; --errFg:#991b1b; --panel:#fafafa; --line:#eee; --blue:#2563eb; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color:var(--fg);}
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    .muted { color:var(--muted); font-size:14px; }
+    .row { margin: 12px 0; }
+    input[type="file"] { padding: 6px; }
+    textarea { width:100%; min-height: 160px; resize: vertical; font: inherit; padding:10px; border:1px solid #ddd; border-radius:8px; }
+    button { padding: 8px 14px; border:0; border-radius:8px; background:var(--blue); color:#fff; cursor:pointer; }
+    button:disabled { opacity:.6; cursor: not-allowed; }
+    .panel { border:1px solid var(--line); border-radius:12px; padding:16px; background:var(--panel); }
+    .status { margin-top: 10px; padding:10px 12px; border-radius:8px; }
+    .ok { background:var(--okBg); color:var(--okFg); }
+    .err { background:var(--errBg); color:var(--errFg); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .kv { font-size: 13px; color:#444; }
+    .dim { opacity:.7 }
+  </style>
+</head>
+<body>
+  <h1>Upload Your Resume (PDF)</h1>
+  <p class="muted">We’ll upload your PDF to S3, then automatically score it against a job
+   description.</p>
+
+  <!-- Upload -->
+  <div class="panel">
+    <div class="row">
+      <input id="fileInput" type="file" accept="application/pdf" />
+      <button id="uploadBtn">Upload</button>
+    </div>
+    <div class="row kv">
+      <div><strong>Uploaded objectKey:</strong> <span id="objectKey" class="mono">—</span></div>
+    </div>
+    <div id="uploadStatus" class="status" style="display:none;"></div>
+  </div>
+
+  <!-- Scoring -->
+  <div class="panel" style="margin-top:16px;">
+    <div class="row">
+      <label><strong>Job Description</strong></label>
+      <textarea id="jobText" placeholder="Paste the job description here…"></textarea>
+    </div>
+    <div class="row">
+      <button id="scoreBtn">Get Score</button>
+    </div>
+
+    <div id="scoreStatus" class="status" style="display:none;"></div>
+    <div id="scoreOut" class="panel" style="display:none; background:#fff;"></div>
+  </div>
+
+  <script>
+    // ==== Configure your endpoints ====
+    const GET_UPLOAD_URL_ENDPOINT = "https://qv9w8njj0c.execute-api.us-east-1.amazonaws.com";
+    const SCORE_FUNCTION_URL      = "https://ygws22tht5ij3omnx5l6kow35y0homkt.lambda-url.us-east-1.on.aws/";
+
+    // ==== Elements ====
+    const fileInput      = document.getElementById('fileInput');
+    const uploadBtn      = document.getElementById('uploadBtn');
+    const objectKeyEl    = document.getElementById('objectKey');
+    const uploadStatusEl = document.getElementById('uploadStatus');
+
+    const jobTextEl      = document.getElementById('jobText');
+    const scoreBtn       = document.getElementById('scoreBtn');
+    const scoreStatusEl  = document.getElementById('scoreStatus');
+    const scoreOutEl     = document.getElementById('scoreOut');
+
+    // ==== Small helpers ====
+    function showStatus(el, msg, ok = true) {
+      el.style.display = 'block';
+      el.textContent = msg;
+      el.className = 'status ' + (ok ? 'ok' : 'err');
+    }
+    function clearStatus(el) { el.style.display = 'none'; el.textContent = ''; }
+
+    // ==== 1) Upload flow ====
+    async function handleUpload() {
+      clearStatus(uploadStatusEl);
+      objectKeyEl.textContent = '—';
+
+      const file = fileInput.files?.[0];
+      if (!file) {
+        showStatus(uploadStatusEl, 'Please choose a PDF file.', false);
+        return;
+      }
+
+      try {
+        uploadBtn.disabled = true;
+
+        // Ask API Gateway for a signed URL
+        const api = `${GET_UPLOAD_URL_ENDPOINT}/upload-url?file=${encodeURIComponent(file.name)}`;
+        const res = await fetch(api, { method: 'GET' });
+        if (!res.ok) {
+          const t = await res.text().catch(()=>'');
+          throw new Error(`upload-url failed: ${res.status} ${t}`);
+        }
+        const { uploadUrl, objectKey } = await res.json();
+
+        // PUT the file directly to S3
+        const putRes = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/pdf' },
+          body: file
+        });
+        if (!putRes.ok) {
+          const t = await putRes.text().catch(()=>'');
+          throw new Error(`S3 PUT failed: ${putRes.status} ${t}`);
+        }
+
+        objectKeyEl.textContent = objectKey;
+        showStatus(uploadStatusEl, 'Upload complete.', true);
+      } catch (err) {
+        console.error(err);
+        showStatus(uploadStatusEl, `Upload failed: ${err.message}`, false);
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    }
+
+    // ==== 2) Score flow ====
+    async function handleScore() {
+      clearStatus(scoreStatusEl);
+      scoreOutEl.style.display = 'none';
+      scoreOutEl.textContent = '';
+
+      const objectKey = objectKeyEl.textContent.trim();
+      const jobText   = jobTextEl.value.trim();
+
+      if (!objectKey || !objectKey.startsWith('uploads/')) {
+        showStatus(scoreStatusEl, 'Please upload a PDF first.', false);
+        return;
+      }
+      if (!jobText) {
+        showStatus(scoreStatusEl, 'Please paste a Job Description.', false);
+        return;
+      }
+
+      scoreBtn.disabled = true;
+      try {
+        const data = await pollScore(objectKey, jobText, {
+          maxAttempts: 20,            // ~40s total with 2s delay
+          delayMs: 2000,
+        });
+        // Render final
+        const missing = (data.missing && data.missing.length) ? data.missing.join(', ') : '—';
+        const key = data.key || data.extractedKey || '—';
+        scoreOutEl.innerHTML =
+          `<div><strong>Score:</strong> ${data.score}%</div>
+           <div style="margin-top:6px"><strong>Missing terms:</strong> ${missing}</div>
+           <div style="margin-top:6px" class="kv"><strong>Extracted Key:</strong> <span class="mono">${key}</span></div>`;
+        scoreOutEl.style.display = 'block';
+        showStatus(scoreStatusEl, 'Done.', true);
+      } catch (err) {
+        console.error(err);
+        showStatus(scoreStatusEl, err.message || 'Score failed', false);
+      } finally {
+        scoreBtn.disabled = false;
+      }
+    }
+
+    // Call the score Lambda; if it returns 202, poll until 200 or timeout
+    async function pollScore(objectKey, jobText, { maxAttempts = 20, delayMs = 2000 } = {}) {
+      let attempt = 0;
+      while (true) {
+        attempt++;
+        showStatus(scoreStatusEl, attempt === 1 ? 'Scoring…' : `Waiting for OCR (attempt ${attempt}/${maxAttempts})`, true);
+
+        const resp = await fetch(SCORE_FUNCTION_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ objectKey, jobText })
+        });
+
+        if (resp.status === 200) {
+          return await resp.json();
+        }
+
+        // Still preparing (Textract not finished → Lambda replied 202)
+        if (resp.status === 202) {
+          if (attempt >= maxAttempts) {
+            throw new Error('Timed out waiting for OCR results. Try again in a few seconds.');
+          }
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+
+        // Any other status → report the body as error
+        const text = await resp.text().catch(()=>'');
+        throw new Error(`Score failed: ${resp.status} ${text}`);
+      }
+    }
+
+    // ==== Wire up ====
+    uploadBtn.addEventListener('click', handleUpload);
+    scoreBtn.addEventListener('click', handleScore);
+  </script>
+</body>
+</html>
