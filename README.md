@@ -1,8 +1,11 @@
-# 📝 AI Resume Matcher (Serverless on AWS)
+## AI Resume Matcher (Serverless on AWS)
 
-End-to-end serverless pipeline to match resume PDFs against job descriptions.  
-This project demonstrates how to build a **scalable, cost-effective, and fully serverless application** on AWS using S3, Lambda, Textract, API Gateway, CloudFormation and CloudFront.  
-The system allows users to upload resumes, extract text with Textract, and compute a similarity score against a job description — all without managing servers.
+
+## Overview
+
+AI Resume Matcher is an **end-to-end serverless pipeline** that automatically extracts text from resumes (PDFs) and matches it against a given job description.
+What makes this project special is that it’s built entirely with **Infrastructure as Code (IaC)** using **AWS CloudFormation**.  
+All AWS resources — S3 buckets, Lambda functions, IAM roles, API Gateway routes, EventBridge rules, and SNS topics — are provisioned and managed through YAML stacks. This ensures the system is reproducible, maintainable, and production-ready.
 
 ---
 
