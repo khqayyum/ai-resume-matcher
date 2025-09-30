@@ -13,7 +13,7 @@ End-to-end serverless pipeline to match resume PDFs against job descriptions.
 
 ```mermaid
 flowchart LR
-  UI(index_final.html (CloudFront)) --> API[API Gateway GET /upload-url]
+  UI[index_final.html (CloudFront)] --> API[API Gateway GET /upload-url]
   API --> UP[Lambda: upload-url]
   UP --> S3[(S3 uploads/)]
   S3 --> EVB[EventBridge] --> DIS[Lambda: dispatcher]
