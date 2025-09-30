@@ -30,9 +30,9 @@ SCORE --> MAPS
 
 ## How it works
 
-1.Frontend (CloudFront + S3): User uploads a resume PDF via the UI.
-2.Presigned URL Lambda + API Gateway: Generates a temporary upload link.
-3.S3 + EventBridge: New file in uploads/ triggers the dispatcher Lambda.
-4.Textract + SNS + Collector Lambda: Extracts text, stores results in extracted/ and maps/.
-5.Score Lambda: Compares resume text with job description and returns similarity score + missing keywords.
-6.UI: Displays the result back to the user.
+1. Frontend (CloudFront + S3): User uploads a resume PDF via the UI.
+2. Presigned URL Lambda + API Gateway: Generates a temporary upload link.
+3. S3 + EventBridge: New file in uploads/ triggers the dispatcher Lambda.
+4. Textract + SNS + Collector Lambda: Extracts text, stores results in extracted/ and maps/.
+5. Score Lambda: Compares resume text with job description and returns similarity score + missing keywords.
+6. UI: Displays the result back to the user.
