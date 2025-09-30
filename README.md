@@ -9,21 +9,19 @@ End-to-end serverless pipeline to match resume PDFs against job descriptions.
 
 ---
 
-## 📐 Architecture
-![Architecture](docs/architecture.png)
-
-Or see below (Mermaid):
+## Architecture
 
 ```mermaid
 flowchart LR
-  UI[index_final.html<br/>(CloudFront)] --> API[API Gateway<br/>GET /upload-url]
+  UI[index_final.html (CloudFront)] --> API[API Gateway GET /upload-url]
   API --> UP[Lambda: upload-url]
-  UP --> S3[(S3: uploads/)]
+  UP --> S3[(S3 uploads/)]
   S3 --> EVB[EventBridge] --> DIS[Lambda: dispatcher]
   DIS --> TEX[Textract]
-  TEX --> SNS[(SNS)] --> COL[Lambda: collector]
-  COL --> EXT[(S3: extracted/)]
-  COL --> MAPS[(S3: maps/)]
+  TEX --> SNS[(SNS Topic)] --> COL[Lambda: collector]
+  COL --> EXT[(S3 extracted/)]
+  COL --> MAPS[(S3 maps/)]
   UI --> SCORE[Lambda URL: score]
   SCORE --> EXT
   SCORE --> MAPS
+
