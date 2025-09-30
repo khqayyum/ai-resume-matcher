@@ -11,7 +11,7 @@ The system allows users to upload resumes, extract text with Textract, and compu
 
 ---
 
-## 🏗 Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
