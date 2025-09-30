@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Start Textract for new PDFs under uploads/, and write by-upload and by-job maps.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: kaq-ai-resume-matcher
+
+Resources:
+  # SNS topic where Textract posts job state
+  TextractResultsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${BucketName}-textract-results'
+
+  # Allow only our dedicated Textract role to publish to the topic
+  TextractResultsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [ !Ref TextractResultsTopic ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPublishFromTextractRole
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt TextractPublishRole.Arn
+            Action: sns:Publish
+            Resource: !Ref TextractResultsTopic
+
+  # Role Textract will assume to publish to our topic
+  TextractPublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-textract-publish-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: textract.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowPublishToTopic
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref TextractResultsTopic
+
+  # Lambda execution role for the dispatcher
+  DispatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-dispatcher-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartTextractReadWriteMaps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Start Textract jobs
+              - Effect: Allow
+                Action: textract:StartDocumentTextDetection
+                Resource: '*'
+              # Read the uploaded PDFs
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/uploads/*'
+              # Write our mapping files
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/maps/*'
+              # Allow passing the Textract role used for SNS
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt TextractPublishRole.Arn
+
+  # Dispatcher Lambda
+  DispatcherFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${BucketName}-dispatcher'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt DispatcherRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+          SNS_TOPIC_ARN: !Ref TextractResultsTopic
+          TEXTRACT_ROLE_ARN: !GetAtt TextractPublishRole.Arn
+      Code:
+        ZipFile: |
+          const { TextractClient, StartDocumentTextDetectionCommand } = require("@aws-sdk/client-textract");
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+
+          const textract = new TextractClient({});
+          const s3 = new S3Client({});
+
+          exports.handler = async (event) => {
+            try {
+              // Accept either S3 Notification or EventBridge
+              let bucket = "", key = "";
+
+              if (event?.Records?.[0]?.s3) {
+                const rec = event.Records[0];
+                bucket = rec.s3.bucket.name || "";
+                key    = rec.s3.object.key || "";
+                key = decodeURIComponent(String(key).replace(/\+/g, " "));
+              } else if (event?.detail) {
+                const d = event.detail;
+                bucket = d?.bucket?.name || process.env.BUCKET_NAME || "";
+                key    = d?.object?.key ? decodeURIComponent(String(d.object.key).replace(/\+/g, " ")) : "";
+              }
+
+              console.log("BUCKET:", bucket, "KEY:", key);
+
+              if (!bucket || !key) {
+                console.warn("Missing bucket/key, skipping.");
+                return { statusCode: 400, body: "missing bucket/key" };
+              }
+
+              // Only process PDFs under uploads/
+              if (!key.startsWith("uploads/") || !key.toLowerCase().endsWith(".pdf")) {
+                console.log("Ignoring:", key);
+                return { statusCode: 200, body: "ignored" };
+              }
+
+              const params = {
+                DocumentLocation: { S3Object: { Bucket: bucket, Name: key } },
+                NotificationChannel: {
+                  SNSTopicArn: process.env.SNS_TOPIC_ARN,
+                  RoleArn: process.env.TEXTRACT_ROLE_ARN
+                }
+              };
+              console.log("PARAMS", JSON.stringify(params));
+
+              const out = await textract.send(new StartDocumentTextDetectionCommand(params));
+              console.log("Started Textract job:", out.JobId);
+
+              // Write mapping files immediately so UI can resolve either direction
+              const now = new Date().toISOString();
+
+              // by-upload mapping
+              const byUploadKey = `maps/by-upload/${encodeURIComponent(key)}.json`;
+              await s3.send(new PutObjectCommand({
+                Bucket: process.env.BUCKET_NAME,
+                Key: byUploadKey,
+                ContentType: "application/json",
+                Body: JSON.stringify({
+                  jobId: out.JobId,
+                  status: "STARTED",
+                  objectKey: key,
+                  ts: now
+                })
+              }));
+              console.log("Wrote", byUploadKey);
+
+              // by-job mapping
+              const byJobKey = `maps/by-job/${out.JobId}.json`;
+              await s3.send(new PutObjectCommand({
+                Bucket: process.env.BUCKET_NAME,
+                Key: byJobKey,
+                ContentType: "application/json",
+                Body: JSON.stringify({
+                  jobId: out.JobId,
+                  status: "STARTED",
+                  objectKey: key,
+                  ts: now
+                })
+              }));
+              console.log("Wrote", byJobKey);
+
+              return { statusCode: 200, body: `started ${out.JobId}` };
+            } catch (err) {
+              console.error("Dispatcher error:", err);
+              return { statusCode: 500, body: "textract-start-failed" };
+            }
+          };
+
+  # EventBridge rule: invoke dispatcher on new S3 object events for this bucket's uploads/ prefix
+  S3CreateRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${BucketName}-uploads-created-rule'
+      EventPattern:
+        source: ['aws.s3']
+        detail-type: ['Object Created']
+        detail:
+          bucket: { name: [ !Ref BucketName ] }
+          object:
+            key: { prefix: ['uploads/'] }
+      Targets:
+        - Arn: !GetAtt DispatcherFn.Arn
+          Id: TargetDispatcher
+
+  AllowEventsInvokeDispatcher:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DispatcherFn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3CreateRule.Arn
+
+Outputs:
+  TextractResultsTopicArn:
+    Value: !Ref TextractResultsTopic
+    Export:
+      Name: kaq-ai-resume-matcher-TextractResultsTopicArn
+  DispatcherFunctionName:
+    Value: !Ref DispatcherFn
