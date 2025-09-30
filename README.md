@@ -36,3 +36,25 @@ SCORE --> MAPS
 4. Textract + SNS + Collector Lambda: Extracts text, stores results in extracted/ and maps/.
 5. Score Lambda: Compares resume text with job description and returns similarity score + missing keywords.
 6. UI: Displays the result back to the user.
+
+## Services Used
+
+- **Amazon S3** – stores resumes, extracted text, and JSON maps
+- **Amazon CloudFront** – serves static UI globally
+- **Amazon API Gateway** (HTTP API) – routes requests to Lambda
+- **AWS Lambda** (Node.js 20) – serverless functions: upload-url, dispatcher, collector, score
+- **Amazon Textract** – extracts structured text from resumes
+- **Amazon SNS** – event channel for Textract results
+- **Amazon EventBridge** – triggers dispatcher Lambda on file uploads
+- **AWS IAM Roles & Policies** – secure access control
+
+## How to Use
+
+1. Open the CloudFront UI: https://d2a16brw1up50y.cloudfront.net
+2. Upload a resume PDF (max ~10 MB).
+3. Paste a job description into the text box.
+4. Submit → wait a few seconds while Textract processes the resume.
+5. View your similarity score and missing keywords in the results.
+
+## License
+This project is licensed under the MIT License – see the LICENSE file for details.
